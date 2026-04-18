@@ -319,6 +319,8 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(result).toEqual({ cancelled: false, selectedText: undefined });
 		await runtime.session.bindExtensions({});
 		expect(runtime.session.sessionFile).toBeDefined();
+		expect(existsSync(runtime.session.sessionFile!)).toBe(false);
+		expect(runtime.session.sessionManager.materialize()).toBe(runtime.session.sessionFile);
 		expect(existsSync(runtime.session.sessionFile!)).toBe(true);
 		expect(runtime.session.messages).toHaveLength(1);
 		expect(runtime.session.messages[0]?.role).toBe("user");
@@ -356,6 +358,8 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(runtime.session.messages).toEqual([]);
 		expect(runtime.session.sessionFile).toBeDefined();
 		expect(runtime.session.sessionFile).not.toBe(originalSessionFile);
+		expect(existsSync(runtime.session.sessionFile!)).toBe(false);
+		expect(runtime.session.sessionManager.materialize()).toBe(runtime.session.sessionFile);
 		expect(existsSync(runtime.session.sessionFile!)).toBe(true);
 	});
 
