@@ -1291,10 +1291,14 @@ export class SessionManager {
 		this._buildIndex();
 
 		if (this.persist) {
-			// Branched sessions must exist on disk immediately so they can be
-			// resumed/listed even when the copied branch has no assistant reply yet.
-			this._rewriteFile();
-			this.flushed = true;
+			if (data.hasAssistant) {
+				this._rewriteFile();
+				this.flushed = true;
+			} else {
+				// Match newSession(): defer file creation until the branch has an
+				// assistant message, unless callers explicitly materialize().
+				this.flushed = false;
+			}
 		}
 
 		return this.sessionFile;
