@@ -5,6 +5,7 @@ import { DynamicBorder } from "./dynamic-border.js";
 interface UserMessageItem {
 	id: string; // Entry ID in the session
 	text: string; // The message text
+	meta?: string; // Optional metadata line override
 	timestamp?: string; // Optional timestamp if available
 }
 
@@ -18,11 +19,12 @@ class UserMessageList implements Component {
 	public onCancel?: () => void;
 	private maxVisible: number = 10; // Max messages visible
 
-	constructor(messages: UserMessageItem[]) {
+	constructor(messages: UserMessageItem[], initialSelectedId?: string) {
 		// Store messages in chronological order (oldest to newest)
 		this.messages = messages;
-		// Start with the last (most recent) message selected
-		this.selectedIndex = Math.max(0, messages.length - 1);
+		const initialIndex = initialSelectedId ? messages.findIndex((message) => message.id === initialSelectedId) : -1;
+		// Start with the requested item selected, otherwise the last (most recent) message
+		this.selectedIndex = initialIndex >= 0 ? initialIndex : Math.max(0, messages.length - 1);
 	}
 
 	invalidate(): void {
@@ -62,7 +64,7 @@ class UserMessageList implements Component {
 
 			// Second line: metadata (position in history)
 			const position = i + 1;
-			const metadata = `  Message ${position} of ${this.messages.length}`;
+			const metadata = message.meta ?? `  Message ${position} of ${this.messages.length}`;
 			const metadataLine = theme.fg("muted", metadata);
 			lines.push(metadataLine);
 			lines.push(""); // Blank line between messages
@@ -109,19 +111,24 @@ class UserMessageList implements Component {
 export class UserMessageSelectorComponent extends Container {
 	private messageList: UserMessageList;
 
-	constructor(messages: UserMessageItem[], onSelect: (entryId: string) => void, onCancel: () => void) {
+	constructor(
+		messages: UserMessageItem[],
+		onSelect: (entryId: string) => void,
+		onCancel: () => void,
+		initialSelectedId?: string,
+	) {
 		super();
 
 		// Add header
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.bold("Branch from Message"), 1, 0));
-		this.addChild(new Text(theme.fg("muted", "Select a message to create a new branch from that point"), 1, 0));
+		this.addChild(new Text(theme.fg("muted", "Select a message or the current state to create a new branch"), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
 		// Create message list
-		this.messageList = new UserMessageList(messages);
+		this.messageList = new UserMessageList(messages, initialSelectedId);
 		this.messageList.onSelect = onSelect;
 		this.messageList.onCancel = onCancel;
 

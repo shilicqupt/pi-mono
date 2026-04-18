@@ -334,11 +334,25 @@ export class RpcClient {
 	}
 
 	/**
-	 * Fork from a specific message.
-	 * @returns Object with `text` (the message text) and `cancelled` (if extension cancelled)
+	 * Fork from a specific message or the current leaf.
+	 * @returns Object with optional `text` (the selected message text when forking before a message)
+	 * and `cancelled` (if extension cancelled)
 	 */
-	async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
-		const response = await this.send({ type: "fork", entryId });
+	async fork(
+		entryId?: string,
+		options?: { position?: "before" | "at" },
+	): Promise<{ text?: string; cancelled: boolean }> {
+		const position = options?.position ?? (entryId === undefined ? "at" : "before");
+
+		let response: RpcResponse;
+		if (position === "at") {
+			response = await this.send({ type: "fork", entryId, position: "at" });
+		} else {
+			if (entryId === undefined) {
+				throw new Error("entryId is required when forking before a message");
+			}
+			response = await this.send({ type: "fork", entryId, position: "before" });
+		}
 		return this.getData(response);
 	}
 

@@ -580,10 +580,18 @@ If an extension cancelled the switch:
 
 #### fork
 
-Create a new fork from a previous user message. Can be cancelled by a `session_before_fork` extension event handler. Returns the text of the message being forked from.
+Create a new fork either from a previous user message or from the current leaf. Can be cancelled by a `session_before_fork` extension event handler. Forking from a previous user message returns that message text; exact current-state duplication does not.
+
+Fork before a previous user message:
 
 ```json
-{"type": "fork", "entryId": "abc123"}
+{"type": "fork", "entryId": "abc123", "position": "before"}
+```
+
+Fork at the current leaf / current state:
+
+```json
+{"type": "fork", "position": "at"}
 ```
 
 Response:
@@ -596,13 +604,23 @@ Response:
 }
 ```
 
+Exact-state fork response:
+```json
+{
+  "type": "response",
+  "command": "fork",
+  "success": true,
+  "data": {"cancelled": false}
+}
+```
+
 If an extension cancelled the fork:
 ```json
 {
   "type": "response",
   "command": "fork",
   "success": true,
-  "data": {"text": "The original prompt text...", "cancelled": true}
+  "data": {"cancelled": true}
 }
 ```
 

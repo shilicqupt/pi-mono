@@ -803,15 +803,14 @@ export class SessionManager {
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
-			// Mark as not flushed so when assistant arrives, all entries get written
+			// Mark as not flushed so when assistant arrives, the file is rewritten
+			// with all accumulated entries.
 			this.flushed = false;
 			return;
 		}
 
 		if (!this.flushed) {
-			for (const e of this.fileEntries) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
-			}
+			this._rewriteFile();
 			this.flushed = true;
 		} else {
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
@@ -1167,11 +1166,43 @@ export class SessionManager {
 	 * Useful for extracting a single conversation path from a branched session.
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
-	createBranchedSession(leafId: string): string | undefined {
+	private _buildBranchedSessionData(
+		leafId: string,
+		options?: { preserveLabelHistory?: boolean },
+	): {
+		entries: FileEntry[];
+		sessionId: string;
+		sessionFile: string | undefined;
+		hasAssistant: boolean;
+	} {
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
+		}
+
+		if (options?.preserveLabelHistory) {
+			const newSessionId = createSessionId();
+			const timestamp = new Date().toISOString();
+			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+			const newSessionFile = join(this.getSessionDir(), `${fileTimestamp}_${newSessionId}.jsonl`);
+
+			return {
+				entries: [
+					{
+						type: "session",
+						version: CURRENT_SESSION_VERSION,
+						id: newSessionId,
+						timestamp,
+						cwd: this.cwd,
+						parentSession: this.persist ? previousSessionFile : undefined,
+					},
+					...path,
+				],
+				sessionId: newSessionId,
+				sessionFile: this.persist ? newSessionFile : undefined,
+				hasAssistant: path.some((e) => e.type === "message" && e.message.role === "assistant"),
+			};
 		}
 
 		// Filter out LabelEntry from path - we'll recreate them from the resolved map
@@ -1200,6 +1231,7 @@ export class SessionManager {
 			}
 		}
 
+		let entries: FileEntry[];
 		if (this.persist) {
 			// Build label entries
 			const lastEntryId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
@@ -1219,46 +1251,82 @@ export class SessionManager {
 				parentId = labelEntry.id;
 			}
 
-			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-			this.sessionId = newSessionId;
-			this.sessionFile = newSessionFile;
-			this._buildIndex();
-
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
-				this._rewriteFile();
-				this.flushed = true;
-			} else {
-				this.flushed = false;
+			entries = [header, ...pathWithoutLabels, ...labelEntries];
+		} else {
+			const labelEntries: LabelEntry[] = [];
+			let parentId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
+			for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
+				const labelEntry: LabelEntry = {
+					type: "label",
+					id: generateId(new Set([...pathEntryIds, ...labelEntries.map((e) => e.id)])),
+					parentId,
+					timestamp: labelTimestamp,
+					targetId,
+					label,
+				};
+				labelEntries.push(labelEntry);
+				parentId = labelEntry.id;
 			}
 
-			return newSessionFile;
+			entries = [header, ...pathWithoutLabels, ...labelEntries];
 		}
 
-		// In-memory mode: replace current session with the path + labels
-		const labelEntries: LabelEntry[] = [];
-		let parentId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
-		for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
-			const labelEntry: LabelEntry = {
-				type: "label",
-				id: generateId(new Set([...pathEntryIds, ...labelEntries.map((e) => e.id)])),
-				parentId,
-				timestamp: labelTimestamp,
-				targetId,
-				label,
-			};
-			labelEntries.push(labelEntry);
-			parentId = labelEntry.id;
-		}
-		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-		this.sessionId = newSessionId;
+		return {
+			entries,
+			sessionId: newSessionId,
+			sessionFile: this.persist ? newSessionFile : undefined,
+			hasAssistant: entries.some((e) => e.type === "message" && e.message.role === "assistant"),
+		};
+	}
+
+	private _applyBranchedSessionData(data: {
+		entries: FileEntry[];
+		sessionId: string;
+		sessionFile: string | undefined;
+		hasAssistant: boolean;
+	}): string | undefined {
+		this.fileEntries = data.entries;
+		this.sessionId = data.sessionId;
+		this.sessionFile = data.sessionFile;
 		this._buildIndex();
-		return undefined;
+
+		if (this.persist) {
+			// Branched sessions must exist on disk immediately so they can be
+			// resumed/listed even when the copied branch has no assistant reply yet.
+			this._rewriteFile();
+			this.flushed = true;
+		}
+
+		return this.sessionFile;
+	}
+
+	createBranchedSession(leafId: string): string | undefined {
+		return this._applyBranchedSessionData(this._buildBranchedSessionData(leafId));
+	}
+
+	/**
+	 * Create a branched session manager without mutating the current manager.
+	 * Useful when the current session must remain intact until later teardown.
+	 */
+	createBranchedSessionCopy(leafId: string, options?: { preserveLabelHistory?: boolean }): SessionManager {
+		const data = this._buildBranchedSessionData(leafId, options);
+		const sessionManager = new SessionManager(this.cwd, this.sessionDir, undefined, this.persist);
+		sessionManager._applyBranchedSessionData(data);
+		return sessionManager;
+	}
+
+	/**
+	 * Force creation of the current session file on disk.
+	 * Used by flows that must survive process exit before the first assistant reply.
+	 */
+	materialize(): string | undefined {
+		if (!this.persist || !this.sessionFile) {
+			return this.sessionFile;
+		}
+
+		this._rewriteFile();
+		this.flushed = true;
+		return this.sessionFile;
 	}
 
 	/**

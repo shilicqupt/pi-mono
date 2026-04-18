@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@mariozechner/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -33,7 +33,12 @@ describe("AgentSessionRuntime characterization", () => {
 
 	async function createRuntimeForTest(
 		extensionFactory: ExtensionFactory,
-		options?: { cwd?: string; bootstrapModel?: boolean; bootstrapThinkingLevel?: boolean },
+		options?: {
+			cwd?: string;
+			bootstrapModel?: boolean;
+			bootstrapThinkingLevel?: boolean;
+			sessionManager?: SessionManager;
+		},
 	) {
 		const tempDir =
 			options?.cwd ?? join(tmpdir(), `pi-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -101,7 +106,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			sessionManager: options?.sessionManager ?? SessionManager.create(tempDir),
 		});
 		await runtime.session.bindExtensions({});
 
@@ -217,7 +222,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(successResult.selectedText).toBe("hello");
 		await runtime.session.bindExtensions({});
 		expect(events).toEqual([
-			{ type: "session_before_fork", entryId: userMessage.entryId },
+			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
 			{ type: "session_start", reason: "fork", previousSessionFile },
 		]);
 
@@ -225,7 +230,184 @@ describe("AgentSessionRuntime characterization", () => {
 		cancelNextFork = true;
 		const cancelResult = await runtime.fork(userMessage.entryId);
 		expect(cancelResult).toEqual({ cancelled: true });
-		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId }]);
+		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" }]);
+	});
+
+	it("emits session_shutdown against the original session before persisted fork replacement", async () => {
+		let shutdownSessionFile: string | undefined;
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", (_event, ctx) => {
+				shutdownSessionFile = ctx.sessionManager.getSessionFile();
+			});
+		});
+
+		await runtime.session.prompt("hello");
+		const previousSessionFile = runtime.session.sessionFile;
+
+		const result = await runtime.fork();
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		expect(shutdownSessionFile).toBe(previousSessionFile);
+	});
+
+	it("defaults to current-leaf forking when entryId is omitted", async () => {
+		const events: RecordedSessionEvent[] = [];
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_before_fork", (event) => {
+				events.push(event);
+			});
+			pi.on("session_start", (event) => {
+				events.push(event);
+			});
+		});
+
+		events.length = 0;
+		await runtime.session.prompt("hello");
+		const originalMessages = [...runtime.session.messages];
+		const previousSessionFile = runtime.session.sessionFile;
+
+		const result = await runtime.fork();
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		await runtime.session.bindExtensions({});
+		expect(runtime.session.messages).toEqual(originalMessages);
+		expect(events).toEqual([
+			{ type: "session_before_fork", entryId: undefined, position: "at" },
+			{ type: "session_start", reason: "fork", previousSessionFile },
+		]);
+	});
+
+	it("forks the current leaf for persisted user-only sessions", async () => {
+		const tempDir = join(tmpdir(), `pi-runtime-user-only-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+
+		const initialSessionManager = SessionManager.create(tempDir);
+		const sessionFile = initialSessionManager.getSessionFile()!;
+		const timestamp = new Date().toISOString();
+		writeFileSync(
+			sessionFile,
+			`${[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: initialSessionManager.getSessionId(),
+					timestamp,
+					cwd: tempDir,
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "user-only-entry",
+					parentId: null,
+					timestamp,
+					message: {
+						role: "user",
+						content: [{ type: "text", text: "draft" }],
+						timestamp: Date.now(),
+					},
+				}),
+			].join("\n")}
+`,
+		);
+
+		const { runtime } = await createRuntimeForTest(() => {}, {
+			cwd: tempDir,
+			sessionManager: SessionManager.open(sessionFile, initialSessionManager.getSessionDir()),
+		});
+
+		expect(runtime.session.messages).toHaveLength(1);
+		expect(runtime.session.messages[0]?.role).toBe("user");
+
+		const result = await runtime.fork(undefined, { position: "at" });
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		await runtime.session.bindExtensions({});
+		expect(runtime.session.sessionFile).toBeDefined();
+		expect(existsSync(runtime.session.sessionFile!)).toBe(true);
+		expect(runtime.session.messages).toHaveLength(1);
+		expect(runtime.session.messages[0]?.role).toBe("user");
+		expect(runtime.session.messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "draft" }],
+		});
+	});
+
+	it("forks the current state with exact label history and leaf state", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+
+		await runtime.session.prompt("hello");
+		const userMessage = runtime.session.getUserMessagesForForking()[0]!;
+		runtime.session.sessionManager.appendLabelChange(userMessage.entryId, "checkpoint");
+		const clearedLabelId = runtime.session.sessionManager.appendLabelChange(userMessage.entryId, undefined);
+		const originalEntries = runtime.session.sessionManager.getEntries();
+
+		const result = await runtime.fork(undefined, { position: "at" });
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		await runtime.session.bindExtensions({});
+
+		expect(runtime.session.sessionManager.getLeafId()).toBe(clearedLabelId);
+		expect(runtime.session.sessionManager.getEntries()).toEqual(originalEntries);
+		expect(runtime.session.sessionManager.getLabel(userMessage.entryId)).toBeUndefined();
+	});
+
+	it("materializes persisted current-state forks from empty sessions", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const originalSessionFile = runtime.session.sessionFile;
+
+		const result = await runtime.fork(undefined, { position: "at" });
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		await runtime.session.bindExtensions({});
+		expect(runtime.session.messages).toEqual([]);
+		expect(runtime.session.sessionFile).toBeDefined();
+		expect(runtime.session.sessionFile).not.toBe(originalSessionFile);
+		expect(existsSync(runtime.session.sessionFile!)).toBe(true);
+	});
+
+	it("emits session_shutdown against the original in-memory session before fork replacement", async () => {
+		let shutdownEntryCount = 0;
+		const tempDir = join(tmpdir(), `pi-runtime-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const { runtime } = await createRuntimeForTest(
+			(pi: ExtensionAPI) => {
+				pi.on("session_shutdown", (_event, ctx) => {
+					shutdownEntryCount = ctx.sessionManager.getEntries().length;
+				});
+			},
+			{ cwd: tempDir, sessionManager },
+		);
+
+		await runtime.session.prompt("hello");
+		const userMessage = runtime.session.getUserMessagesForForking()[0]!;
+		const originalEntryCount = runtime.session.sessionManager.getEntries().length;
+
+		const result = await runtime.fork(userMessage.entryId);
+		expect(result).toEqual({ cancelled: false, selectedText: "hello" });
+		expect(shutdownEntryCount).toBe(originalEntryCount);
+	});
+
+	it("keeps the current session active when persisted branch creation fails", async () => {
+		let shutdownCalled = false;
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", () => {
+				shutdownCalled = true;
+			});
+		});
+
+		await runtime.session.prompt("hello");
+		const originalSession = runtime.session;
+		const originalSessionFile = runtime.session.sessionFile;
+
+		const createBranchedSessionCopySpy = vi
+			.spyOn(SessionManager.prototype, "createBranchedSessionCopy")
+			.mockImplementation(() => {
+				throw new Error("branch failed");
+			});
+
+		try {
+			await expect(runtime.fork(undefined, { position: "at" })).rejects.toThrow("branch failed");
+			expect(shutdownCalled).toBe(false);
+			expect(runtime.session).toBe(originalSession);
+			expect(runtime.session.sessionFile).toBe(originalSessionFile);
+		} finally {
+			createBranchedSessionCopySpy.mockRestore();
+		}
 	});
 
 	it("throws when forking with an invalid entry id", async () => {

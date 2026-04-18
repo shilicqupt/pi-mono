@@ -350,10 +350,10 @@ Fired when forking via `/fork`.
 
 ```typescript
 pi.on("session_before_fork", async (event, ctx) => {
-  // event.entryId - ID of the entry being forked from
+  // event.position - "before" for user-message fork
+  //                  "at" for exact current-state duplication
+  // event.entryId - selected entry ID, or undefined for `/fork` → "Current state"
   return { cancel: true }; // Cancel fork
-  // OR
-  return { skipConversationRestore: true }; // Fork but don't rewind messages
 });
 ```
 
@@ -909,13 +909,18 @@ if (result.cancelled) {
 }
 ```
 
-### ctx.fork(entryId)
+### ctx.fork(entryId?, options?)
 
-Fork from a specific entry, creating a new session file:
+Fork into a new session file:
 
 ```typescript
-const result = await ctx.fork("entry-id-123");
-if (!result.cancelled) {
+// Standard /fork behavior: rewind to the parent of a user message
+const result = await ctx.fork("entry-id-123", { position: "before" });
+
+// Exact duplication of the current leaf / current state
+const cloned = await ctx.fork(undefined, { position: "at" });
+
+if (!result.cancelled && !cloned.cancelled) {
   // Now in the forked session
 }
 ```

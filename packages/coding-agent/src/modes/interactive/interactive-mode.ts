@@ -1451,9 +1451,9 @@ export class InteractiveMode {
 						return this.handleFatalRuntimeError("Failed to create session", error);
 					}
 				},
-				fork: async (entryId) => {
+				fork: async (entryId, options) => {
 					try {
-						const result = await this.runtimeHost.fork(entryId);
+						const result = await this.runtimeHost.fork(entryId, options);
 						if (!result.cancelled) {
 							await this.handleRuntimeSessionChange();
 							this.renderCurrentSessionState();
@@ -3970,18 +3970,32 @@ export class InteractiveMode {
 	}
 
 	private showUserMessageSelector(): void {
+		const currentStateOptionId = "__pi_current_state__";
 		const userMessages = this.session.getUserMessagesForForking();
+		const leafId = this.sessionManager.getLeafId();
+		const canForkCurrentState = leafId !== null || userMessages.length === 0;
+		const selectableEntries = [
+			...userMessages.map((message) => ({ id: message.entryId, text: message.text })),
+			...(canForkCurrentState
+				? [{ id: currentStateOptionId, text: "Current state", meta: "  Clone exact current session state" }]
+				: []),
+		];
+		const initialSelectedId =
+			userMessages.at(-1)?.entryId ?? (canForkCurrentState ? currentStateOptionId : undefined);
 
-		if (userMessages.length === 0) {
+		if (selectableEntries.length === 0) {
 			this.showStatus("No messages to fork from");
 			return;
 		}
 
 		this.showSelector((done) => {
 			const selector = new UserMessageSelectorComponent(
-				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
+				selectableEntries,
 				async (entryId) => {
-					const result = await this.runtimeHost.fork(entryId);
+					const result =
+						entryId === currentStateOptionId
+							? await this.runtimeHost.fork(undefined, { position: "at" })
+							: await this.runtimeHost.fork(entryId);
 					if (result.cancelled) {
 						done();
 						this.ui.requestRender();
@@ -3997,6 +4011,7 @@ export class InteractiveMode {
 					done();
 					this.ui.requestRender();
 				},
+				initialSelectedId,
 			);
 			return { component: selector, focus: selector.getMessageList() };
 		});

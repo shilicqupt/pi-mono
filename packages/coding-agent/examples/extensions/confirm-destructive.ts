@@ -46,10 +46,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_fork", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 
-		const choice = await ctx.ui.select(`Fork from entry ${event.entryId.slice(0, 8)}?`, [
-			"Yes, create fork",
-			"No, stay in current session",
-		]);
+		const target = event.position === "at" ? "current state" : `entry ${event.entryId?.slice(0, 8)}`;
+		const choice = await ctx.ui.select(`Fork from ${target}?`, ["Yes, create fork", "No, stay in current session"]);
 
 		if (choice !== "Yes, create fork") {
 			ctx.ui.notify("Fork cancelled", "info");

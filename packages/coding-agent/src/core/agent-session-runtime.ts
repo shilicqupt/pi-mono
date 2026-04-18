@@ -110,7 +110,10 @@ export class AgentSessionRuntime {
 		return { cancelled: result?.cancel === true };
 	}
 
-	private async emitBeforeFork(entryId: string): Promise<{ cancelled: boolean }> {
+	private async emitBeforeFork(
+		entryId: string | undefined,
+		position: "before" | "at",
+	): Promise<{ cancelled: boolean }> {
 		const runner = this.session.extensionRunner;
 		if (!runner?.hasHandlers("session_before_fork")) {
 			return { cancelled: false };
@@ -119,6 +122,7 @@ export class AgentSessionRuntime {
 		const result = await runner.emit({
 			type: "session_before_fork",
 			entryId,
+			position,
 		});
 		return { cancelled: result?.cancel === true };
 	}
@@ -191,28 +195,54 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
-	async fork(entryId: string): Promise<{ cancelled: boolean; selectedText?: string }> {
-		const beforeResult = await this.emitBeforeFork(entryId);
+	async fork(
+		entryId?: string,
+		options?: { position?: "before" | "at" },
+	): Promise<{ cancelled: boolean; selectedText?: string }> {
+		const position = options?.position ?? (entryId === undefined ? "at" : "before");
+		const beforeResult = await this.emitBeforeFork(entryId, position);
 		if (beforeResult.cancelled) {
 			return { cancelled: true };
 		}
 
-		const selectedEntry = this.session.sessionManager.getEntry(entryId);
-		if (!selectedEntry || selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
-			throw new Error("Invalid entry ID for forking");
+		let targetLeafId: string | null;
+		let selectedText: string | undefined;
+
+		if (position === "at") {
+			if (entryId !== undefined) {
+				const selectedEntry = this.session.sessionManager.getEntry(entryId);
+				if (!selectedEntry) {
+					throw new Error("Invalid entry ID for forking");
+				}
+				targetLeafId = selectedEntry.id;
+			} else {
+				targetLeafId = this.session.sessionManager.getLeafId();
+			}
+		} else {
+			if (!entryId) {
+				throw new Error("Entry ID is required for forking before a message");
+			}
+
+			const selectedEntry = this.session.sessionManager.getEntry(entryId);
+			if (!selectedEntry || selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
+				throw new Error("Invalid entry ID for forking");
+			}
+
+			targetLeafId = selectedEntry.parentId;
+			selectedText = extractUserMessageText(selectedEntry.message.content);
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const selectedText = extractUserMessageText(selectedEntry.message.content);
 		if (this.session.sessionManager.isPersisted()) {
 			const currentSessionFile = this.session.sessionFile;
 			if (!currentSessionFile) {
 				throw new Error("Persisted session is missing a session file");
 			}
 			const sessionDir = this.session.sessionManager.getSessionDir();
-			if (!selectedEntry.parentId) {
+			if (!targetLeafId) {
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
+				sessionManager.materialize();
 				await this.teardownCurrent();
 				this.apply(
 					await this.createRuntime({
@@ -225,12 +255,9 @@ export class AgentSessionRuntime {
 				return { cancelled: false, selectedText };
 			}
 
-			const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
-			const forkedSessionPath = sourceManager.createBranchedSession(selectedEntry.parentId);
-			if (!forkedSessionPath) {
-				throw new Error("Failed to create forked session");
-			}
-			const sessionManager = SessionManager.open(forkedSessionPath, sessionDir);
+			const sessionManager = this.session.sessionManager.createBranchedSessionCopy(targetLeafId, {
+				preserveLabelHistory: position === "at",
+			});
 			await this.teardownCurrent();
 			this.apply(
 				await this.createRuntime({
@@ -243,11 +270,13 @@ export class AgentSessionRuntime {
 			return { cancelled: false, selectedText };
 		}
 
-		const sessionManager = this.session.sessionManager;
-		if (!selectedEntry.parentId) {
-			sessionManager.newSession({ parentSession: this.session.sessionFile });
+		let sessionManager: SessionManager;
+		if (!targetLeafId) {
+			sessionManager = SessionManager.inMemory(this.cwd);
 		} else {
-			sessionManager.createBranchedSession(selectedEntry.parentId);
+			sessionManager = this.session.sessionManager.createBranchedSessionCopy(targetLeafId, {
+				preserveLabelHistory: position === "at",
+			});
 		}
 		await this.teardownCurrent();
 		this.apply(

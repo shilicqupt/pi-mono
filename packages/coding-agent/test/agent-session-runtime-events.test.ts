@@ -176,7 +176,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(successResult.selectedText).toBe("hello");
 		await runtimeHost.session.bindExtensions({});
 		expect(events).toEqual([
-			{ type: "session_before_fork", entryId: userMessage.entryId },
+			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
 			{ type: "session_start", reason: "fork", previousSessionFile },
 		]);
 
@@ -184,6 +184,31 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		cancelNextFork = true;
 		const cancelResult = await runtimeHost.fork(userMessage.entryId);
 		expect(cancelResult).toEqual({ cancelled: true });
-		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId }]);
+		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" }]);
+	});
+
+	it("defaults fork position to before with entryId and at without entryId", async () => {
+		const events: RecordedSessionEvent[] = [];
+		const { runtimeHost } = await createRuntimeHost((pi) => {
+			pi.on("session_before_fork", (event) => {
+				events.push(event);
+			});
+			pi.on("session_start", (event) => {
+				events.push(event);
+			});
+		});
+
+		events.length = 0;
+		await runtimeHost.session.prompt("hello");
+		const userMessage = runtimeHost.session.getUserMessagesForForking()[0];
+
+		await runtimeHost.fork(userMessage.entryId);
+		await runtimeHost.session.bindExtensions({});
+		expect(events[0]).toEqual({ type: "session_before_fork", entryId: userMessage.entryId, position: "before" });
+
+		events.length = 0;
+		await runtimeHost.fork();
+		await runtimeHost.session.bindExtensions({});
+		expect(events[0]).toEqual({ type: "session_before_fork", entryId: undefined, position: "at" });
 	});
 });

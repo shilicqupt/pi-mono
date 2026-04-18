@@ -76,8 +76,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					}
 					return result;
 				},
-				fork: async (entryId) => {
-					const result = await runtimeHost.fork(entryId);
+				fork: async (entryId, options) => {
+					const result = await runtimeHost.fork(entryId, options);
 					if (!result.cancelled) {
 						await rebindSession();
 					}

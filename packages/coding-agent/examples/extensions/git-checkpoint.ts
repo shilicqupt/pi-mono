@@ -27,6 +27,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_fork", async (event, ctx) => {
+		if (!event.entryId) return;
+
 		const ref = checkpoints.get(event.entryId);
 		if (!ref) return;
 

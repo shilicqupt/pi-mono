@@ -158,7 +158,7 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 
 - `newSession()`
 - `switchSession()`
-- `fork()`
+- `fork()` - from a previous user message (`position: "before"`) or the current leaf (`position: "at"`)
 - `importFromJsonl()`
 
 Important behavior:
@@ -744,8 +744,11 @@ await runtime.newSession();
 // Replace the active session with another saved session
 await runtime.switchSession("/path/to/session.jsonl");
 
-// Replace the active session with a fork from a specific entry
-await runtime.fork("entry-id");
+// Replace the active session with a fork from a specific user message
+await runtime.fork("entry-id", { position: "before" });
+
+// Replace the active session with an exact duplicate of the current leaf
+await runtime.fork(undefined, { position: "at" });
 ```
 
 **SessionManager tree API:**
